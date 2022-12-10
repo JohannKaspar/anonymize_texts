@@ -24,7 +24,7 @@ def anonymize_names(text):
     # Initialize a dictionary to store the mapping of original names to anonymized names
     replacement_dict = {name.lower(): f"Person {i}" for i, name in enumerate(names)}
 
-    # Create new patterns
+    # Create new patterns 
     patterns = [nlp(name) for name in names]
 
     print(patterns)
