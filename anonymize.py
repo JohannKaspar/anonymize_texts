@@ -1,64 +1,96 @@
-import spacy
-from spacy.matcher import PhraseMatcher
+import argparse
+import os
 
-# Load the de_core_news_md model
-nlp = spacy.load('de_core_news_lg')
+from flair.data import Sentence
+from flair.models import SequenceTagger
+from flair.tokenization import SegtokSentenceSplitter
 
-def anonymize_names(text):
-    # Parse the text using the loaded model
-    doc = nlp(text)
-  
-    # Use the model to identify named entities in the text
-    entities = [(e.text, e.label_) for e in doc.ents]
-  
-    # Filter the entities to only include those of type 'PER'
-    names = [e[0] for e in entities if e[1] == 'PER']
-  
-    # TODO Use entity linking, so that spacy understands, that two mentions of a person
-    # e.g. once with given name, once without, actuall refer to the same entity
-    # maybee use Coreferee: https://github.com/msg-systems/coreferee#the-basic-idea
+def anonymize_names(filename_or_text):
+    # if filename is provided, read text from file
+    if os.path.exists(filename_or_text):
+        with open(filename_or_text) as f:
+            text = f.read()
+    else:
+        text = filename_or_text
 
-    # Create a new PhraseMatcher object from the spaCy vocabulary
-    matcher = PhraseMatcher(nlp.vocab)
+    # load tagger
+    tagger = SequenceTagger.load("flair/ner-german-large")
 
-    # Initialize a dictionary to store the mapping of original names to anonymized names
-    replacement_dict = {name.lower(): f"Person {i}" for i, name in enumerate(names)}
+    # initialize sentence splitter
+    splitter = SegtokSentenceSplitter()
 
-    # Create new patterns 
-    patterns = [nlp(name) for name in names]
+    # use splitter to split text into list of sentences
+    sentences = splitter.split(text)
 
-    print(patterns)
+    # predict tags for sentences
+    tagger.predict(sentences)
 
-    # Add a new pattern to the matcher object that will match the lowercase version of the name
-    matcher.add("names", patterns)
+    # make a list of all entities
+    entities = []
+    positions = {}
+    for sentence in sentences:
+        for entity in sentence.get_spans("ner"):
+            if entity:
+                if entity.get_label("ner").value == "PER":
+                    if "David Schmitt" in entity.text:
+                        print("stop")
+                    positions[(entity.start_position + sentence.start_pos), (entity.end_position + sentence.start_pos)] = entity.text
+                    entities.append(entity)
+                    print(entity)
+    positions = {k: v for k, v in sorted(positions.items(), key=lambda item: item[0][0])}
 
-    # Initialize an empty string to store the updated text after replacing the names
-    anonymized_text = ''
+    # find most common name (this likely is the patients name)
+    mentions = {}
+    for entity in entities:
+        name = entity.text
+        if mentions.get(name):
+            mentions[name] += 1
+        else:
+            mentions[name] = 1
+    mentions = {k: v for k, v in sorted(mentions.items(), key=lambda item: item[1], reverse=True)}
 
-    # Initialize a variable to keep track of the starting position of the buffer in the 'doc' object
-    buffer_start = 0
+    # make a dict of real name --> anonymized name
+    name_dict = {}
+    for i, name in enumerate(mentions.keys()):
+        name_dict[name] = f"Person {i}"
 
-    # Use the matcher object to find all instances of the names in the 'doc' object
-    for match_id, match_start, match_end in matcher(doc):
 
-        # If the start position of the match is greater than the current value of 'buffer_start', 
-        if match_start > buffer_start:
+    # from common mentions to uncommon: if name is substring in other name, they probably belong to the same person
+    # in this case, the anonymized name should be the the anonymized name of the substring + the part outside the substring
+    # e.g. "Müller" translates to "Meier", then "Müllers" should translate to "Meiers"
+    processed = []
+    for clear_name, anon_name in name_dict.items():
+        for processed_name in processed:
+            if processed_name in clear_name:
+                name_dict[clear_name] = clear_name.replace(processed_name, name_dict.get(processed_name))
+        processed.append(clear_name)
 
-            # add the tokens from 'buffer_start' to the start position of the match to the 'anonymized_text' string, along with any trailing whitespace from the previous token
-            anonymized_text += doc[buffer_start: match_start].text + doc[match_start - 1].whitespace_
-        
-        # Replace the token with the anonymized name, with trailing whitespace if available
-        anonymized_text += replacement_dict.get(doc[match_start:match_end].text.lower()) + doc[match_end - 1].whitespace_
-        
-        # Update the 'buffer_start' variable to the start position of the next token
-        buffer_start = match_end
-    
-    # Add any remaining tokens from the end of the 'doc' object to the 'anonymized_text' string
-    anonymized_text += doc[buffer_start:].text
+    # replace the names using entity.start_position and entity.end_position
+    processed_text = ""
+    cursor = 0
+    # TODO Position zum einsetzen im jeweiligen Satz identifizieren
+    # TODO Code untendrunter reevaluieren
+    for (start_position, end_position), entity_text in positions.items():
+        processed_text += text[cursor:start_position]
+        processed_text += name_dict.get(entity_text)
+        cursor = end_position
 
-    return anonymized_text
+    processed_text += text[cursor:]
 
-# Test the function
-text = "Herr Anton Müller ist ein Patient im Krankenhaus. Herr Müller wurde von Dr. Schmidt behandelt, der dem Patienten einige Tests verordnete. Herr Müllers Leber ist gesund."
+    return processed_text
 
-print(anonymize_names(text))
+if __name__ == "__main__":
+    # create ArgumentParser object
+    parser = argparse.ArgumentParser()
+
+    # add arguments
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("-f", "--filename", help="filename to read text from")
+    group.add_argument("-t", "--text", help="text to anonymize")
+
+    # parse arguments
+    args = parser.parse_args()
+
+    # access arguments
+    filename_or_text = args.filename or args.text
+    print(anonymize_names(filename_or_text))
